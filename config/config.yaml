@@ -1,0 +1,209 @@
+# ============================================================
+# Smart Video Analysis System Configuration File
+# 智能视频分析系统配置文件
+# ============================================================
+
+# ------------------------------------------------------------
+# 视频输入配置
+# ------------------------------------------------------------
+video_input:
+  # 输入源类型: camera, file, rtsp
+  source_type: "file"
+  
+  # 输入源路径
+  # - camera: 摄像头索引 (如 "0", "1")
+  # - file: 视频文件路径 (如 "/path/to/video.mp4")
+  # - rtsp: RTSP流地址 (如 "rtsp://localhost:8554/stream")
+  source_path: "./test_video.mp4"
+  
+  # 摄像头索引 (当source_type为camera时使用)
+  camera_index: 0
+  
+  # 视频帧尺寸
+  frame_width: 1920
+  frame_height: 1080
+  
+  # 帧率
+  fps: 30
+  
+  # 是否使用硬件加速
+  use_hw_acceleration: false
+  
+  # 硬件加速设备
+  hw_accel_device: ""
+  
+  # 缓冲区大小
+  buffer_size: 10
+
+# ------------------------------------------------------------
+# 预处理配置
+# ------------------------------------------------------------
+preprocess:
+  # 目标尺寸
+  target_width: 640
+  target_height: 640
+  
+  # 是否保持宽高比
+  keep_aspect_ratio: true
+  
+  # 填充颜色 (RGB)
+  pad_color: [114, 114, 114]
+  
+  # 是否归一化
+  normalize: true
+  
+  # 均值 (用于归一化)
+  mean: [0.0, 0.0, 0.0]
+  
+  # 标准差 (用于归一化)
+  std: [1.0, 1.0, 1.0]
+  
+  # 颜色空间转换: RGB, BGR, GRAY
+  color_mode: "RGB"
+  
+  # 插值方法: linear, nearest, cubic, area
+  interpolation: "linear"
+
+# ------------------------------------------------------------
+# 模型配置
+# ------------------------------------------------------------
+model:
+  # 模型文件路径
+  model_path: "./models/yolov8n.onnx"
+  
+  # 模型类型: yolov8, yolov5, yolov11, resnet, mobilenet
+  model_type: "yolov8"
+  
+  # 输入通道数
+  input_channels: 3
+  
+  # 输入宽度
+  input_width: 640
+  
+  # 输入高度
+  input_height: 640
+  
+  # 输入节点名称
+  input_name: "images"
+  
+  # 输出节点名称
+  output_names: ["output0"]
+
+# ------------------------------------------------------------
+# 推理配置
+# ------------------------------------------------------------
+inference:
+  # 推理线程数
+  num_threads: 4
+  
+  # 执行提供者: CPU, CUDA, TensorRT, OpenVINO, NNAPI
+  execution_provider: "CPU"
+  
+  # 设备ID (用于GPU)
+  device_id: 0
+  
+  # 是否启用FP16推理
+  enable_fp16: false
+  
+  # 是否启用INT8量化
+  enable_int8: false
+  
+  # GPU内存限制 (MB)
+  gpu_mem_limit: 2048
+  
+  # 是否启用详细日志
+  verbose: false
+
+# ------------------------------------------------------------
+# 后处理配置
+# ------------------------------------------------------------
+postprocess:
+  # 置信度阈值
+  confidence_threshold: 0.25
+  
+  # NMS阈值
+  nms_threshold: 0.45
+  
+  # 最大检测数量
+  max_detections: 100
+  
+  # 类别数量
+  num_classes: 80
+  
+  # 是否使用NMS
+  use_nms: true
+  
+  # NMS方法: standard, soft, diou, ciou
+  nms_method: "standard"
+
+# ------------------------------------------------------------
+# 可视化配置
+# ------------------------------------------------------------
+visualization:
+  # 是否显示边界框
+  show_bbox: true
+  
+  # 是否显示标签
+  show_label: true
+  
+  # 是否显示置信度
+  show_confidence: true
+  
+  # 是否显示FPS
+  show_fps: true
+  
+  # 是否显示时间戳
+  show_timestamp: true
+  
+  # 是否显示统计信息
+  show_statistics: true
+  
+  # 边界框线宽
+  box_thickness: 2
+  
+  # 字体大小
+  font_scale: 0.6
+  
+  # 字体线宽
+  font_thickness: 1
+  
+  # 透明度
+  alpha: 0.6
+
+# ------------------------------------------------------------
+# 算子适配配置
+# ------------------------------------------------------------
+operator_adapter:
+  # 目标NPU类型: RK3588, RK3568, GENERIC_NPU
+  target_npu: "RK3588"
+  
+  # 是否启用算子融合
+  enable_fusion: true
+  
+  # 是否启用算子替换
+  enable_replacement: true
+  
+  # 是否检查算子支持性
+  check_support: true
+
+# ------------------------------------------------------------
+# 日志配置
+# ------------------------------------------------------------
+logging:
+  # 日志级别: DEBUG, INFO, WARN, ERROR
+  log_level: "INFO"
+  
+  # 是否输出到控制台
+  console_output: true
+  
+  # 是否输出到文件
+  file_output: true
+  
+  # 日志文件路径
+  log_file_path: "./logs/smart_video_analysis.log"
+  
+  # 最大文件大小 (MB)
+  max_file_size: 10
+  
+  # 最大备份文件数
+  max_backup_files: 5

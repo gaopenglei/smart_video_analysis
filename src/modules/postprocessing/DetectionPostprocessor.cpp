@@ -138,11 +138,12 @@ std::vector<int> DetectionPostprocessor::nms(const std::vector<cv::Rect>& boxes,
             int next_idx = order[j];
             if (suppressed[next_idx]) continue;
             
-            // 计算IoU
+            // 计算IoU（防止除零）
             cv::Rect inter = boxes[idx] & boxes[next_idx];
-            float inter_area = inter.area();
-            float union_area = boxes[idx].area() + boxes[next_idx].area() - inter_area;
-            float iou = inter_area / union_area;
+            float inter_area = static_cast<float>(inter.area());
+            float union_area = static_cast<float>(boxes[idx].area() + boxes[next_idx].area())
+                               - inter_area;
+            float iou = union_area > 0.0f ? inter_area / union_area : 0.0f;
             
             if (iou > nms_threshold) {
                 suppressed[next_idx] = true;
@@ -415,15 +416,10 @@ bool YoloV5Postprocessor::process(const std::vector<std::vector<float>>& output_
 // ============================================================================
 
 YoloV11Postprocessor::YoloV11Postprocessor(const core::PostprocessConfig& config)
-    : DetectionPostprocessor(config) {
+    : YoloV8Postprocessor(config) {
     LOG_DEBUG("YoloV11Postprocessor created");
 }
-
-bool YoloV11Postprocessor::process(const std::vector<std::vector<float>>& output_data,
-                                    DetectionResult& result) {
-    // YOLOv11与YOLOv8输出格式类似
-    return YoloV8Postprocessor(config_).process(output_data, result);
-}
+// process() 直接继承 YoloV8Postprocessor::process()，无需重写。
 
 // ============================================================================
 // ResNetPostprocessor 实现

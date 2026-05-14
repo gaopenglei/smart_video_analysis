@@ -6,8 +6,10 @@
 #include "modules/inference/InferenceEngine.hpp"
 #include "core/Logger.hpp"
 #include <algorithm>
+#include <future>
 #include <numeric>
 #include <cstring>
+#include <stdexcept>
 
 namespace smart_video_analysis {
 namespace modules {
@@ -360,20 +362,18 @@ core::ErrorCode OnnxInferenceEngine::infer(
     }
 }
 
-core::ErrorCode OnnxInferenceEngine::inferAsync(
-    const std::vector<float>& input_data,
-    std::function<void(InferenceResult)> callback) {
-    
-    // 异步推理实现（简单版本，使用std::thread）
-    std::thread([this, input_data, callback]() {
+std::future<InferenceResult> OnnxInferenceEngine::inferAsync(
+    const std::vector<float>& input_data) {
+
+    return std::async(std::launch::async, [this, input_data]() -> InferenceResult {
         InferenceResult result;
-        auto ret = this->infer(input_data, result);
-        if (ret == core::ErrorCode::SUCCESS) {
-            callback(result);
+        core::ErrorCode ret = this->infer(input_data, result);
+        if (ret != core::ErrorCode::SUCCESS) {
+            throw std::runtime_error("Async inference failed with error code: " +
+                                     std::to_string(static_cast<int>(ret)));
         }
-    }).detach();
-    
-    return core::ErrorCode::SUCCESS;
+        return result;
+    });
 }
 
 bool OnnxInferenceEngine::isModelLoaded() const {

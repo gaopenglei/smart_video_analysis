@@ -218,20 +218,13 @@ private:
 
 /**
  * @brief YOLOv11后处理器
+ * 
+ * YOLOv11与YOLOv8输出格式相同，直接复用YoloV8Postprocessor逻辑。
  */
-class YoloV11Postprocessor : public DetectionPostprocessor {
+class YoloV11Postprocessor : public YoloV8Postprocessor {
 public:
     explicit YoloV11Postprocessor(const core::PostprocessConfig& config);
     ~YoloV11Postprocessor() override = default;
-    
-    bool process(const std::vector<std::vector<float>>& output_data,
-                 DetectionResult& result) override;
-
-private:
-    bool parseOutput(const std::vector<float>& output,
-                     int num_classes,
-                     int num_anchors,
-                     std::vector<Detection>& detections);
 };
 
 /**

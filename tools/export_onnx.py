@@ -111,9 +111,16 @@ def export_resnet_to_onnx(model_name: str, output_path: str, imgsz: int = 224,
     
     print(f"Loading ResNet model: {model_name}")
     
-    # 获取模型
+    # 获取模型（torchvision >= 0.13 使用 weights= 参数替代已废弃的 pretrained=True）
     model_fn = getattr(models, model_name)
-    model = model_fn(pretrained=True)
+    weights_enum_name = model_name.replace("resnet", "ResNet").replace("_", "") + "_Weights"
+    try:
+        weights_cls = getattr(models, weights_enum_name, None)
+        weights = weights_cls.DEFAULT if weights_cls else None
+        model = model_fn(weights=weights)
+    except TypeError:
+        # 旧版本 torchvision 回退
+        model = model_fn(pretrained=True)
     model.eval()
     
     # 创建虚拟输入
@@ -152,18 +159,24 @@ def export_mobilenet_to_onnx(model_name: str, output_path: str, imgsz: int = 224
         sys.exit(1)
     
     print(f"Loading MobileNet model: {model_name}")
-    
-    # 获取模型
-    if model_name == "mobilenet_v2":
-        model = models.mobilenet_v2(pretrained=True)
-    elif model_name == "mobilenet_v3_small":
-        model = models.mobilenet_v3_small(pretrained=True)
-    elif model_name == "mobilenet_v3_large":
-        model = models.mobilenet_v3_large(pretrained=True)
-    else:
+
+    # 获取模型（torchvision >= 0.13 使用 weights= 参数替代已废弃的 pretrained=True）
+    _weight_map = {
+        "mobilenet_v2": ("MobileNet_V2_Weights", models.mobilenet_v2),
+        "mobilenet_v3_small": ("MobileNet_V3_Small_Weights", models.mobilenet_v3_small),
+        "mobilenet_v3_large": ("MobileNet_V3_Large_Weights", models.mobilenet_v3_large),
+    }
+    if model_name not in _weight_map:
         print(f"Unknown MobileNet variant: {model_name}")
         sys.exit(1)
-    
+    weights_name, model_fn = _weight_map[model_name]
+    try:
+        weights_cls = getattr(models, weights_name, None)
+        weights = weights_cls.DEFAULT if weights_cls else None
+        model = model_fn(weights=weights)
+    except TypeError:
+        model = model_fn(pretrained=True)
+
     model.eval()
     
     # 创建虚拟输入

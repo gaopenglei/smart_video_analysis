@@ -215,8 +215,9 @@ private:
     
     /**
      * @brief 处理单帧
+     * @param frame 已读取的视频帧
      */
-    bool processSingleFrame();
+    bool processSingleFrame(modules::video_input::VideoFrame& frame);
     
     /**
      * @brief 更新统计信息

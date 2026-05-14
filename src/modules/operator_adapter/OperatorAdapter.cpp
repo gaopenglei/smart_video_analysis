@@ -47,9 +47,9 @@ void RK3588OperatorAdapter::initializeSupportedOperators() {
     supported_operators_.insert("HardSigmoid");
     supported_operators_.insert("HardSwish");
     supported_operators_.insert("PRelu");
-    supported_operators_.insert("Gelu");
     supported_operators_.insert("Silu");
-    supported_operators_.insert("Mish");
+    // 注意：Gelu 和 Mish 在 RK3588 NPU 上不完全支持，
+    // 已在 replacement_rules_ 中配置近似替换，不加入 supported_operators_。
     
     // 归一化
     supported_operators_.insert("BatchNormalization");
@@ -135,11 +135,14 @@ void RK3588OperatorAdapter::initializeSupportedOperators() {
 }
 
 void RK3588OperatorAdapter::initializeReplacementRules() {
-    // 算子替换规则：不支持 -> 支持的替代
-    replacement_rules_["HardSwish"] = "Swish";  // 可以用Swish近似
-    replacement_rules_["Mish"] = "LeakyRelu";   // 可以用LeakyRelu近似
-    replacement_rules_["Gelu"] = "Relu";        // 可以用Relu近似
-    
+    // 算子替换规则：不支持/部分支持 -> 已支持的近似替代
+    // HardSwish ≈ HardSigmoid（两者均来自 MobileNetV3，语义相近）
+    replacement_rules_["HardSwish"] = "HardSigmoid";
+    // Mish ≈ LeakyRelu（精度有损失，但通常可接受）
+    replacement_rules_["Mish"] = "LeakyRelu";
+    // Gelu ≈ Relu（精度有损失，适用于对精度要求不高的场景）
+    replacement_rules_["Gelu"] = "Relu";
+
     LOG_DEBUG("Replacement rules initialized: %zu", replacement_rules_.size());
 }
 

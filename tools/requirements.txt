@@ -1,0 +1,17 @@
+# ============================================================
+# Smart Video Analysis System - Python 工具依赖
+# 用于模型转换脚本 export_onnx.py
+# ============================================================
+
+# ONNX 模型解析与验证
+onnx>=1.14.0
+
+# ONNX 模型简化（消除冗余节点）
+onnxsim>=0.4.0
+
+# PyTorch（YOLOv5 / ResNet / MobileNet 导出所需）
+torch>=2.0.0
+torchvision>=0.15.0
+
+# YOLOv8 / YOLOv11 导出所需（可选，仅在使用 YOLO 时安装）
+# ultralytics>=8.0.0

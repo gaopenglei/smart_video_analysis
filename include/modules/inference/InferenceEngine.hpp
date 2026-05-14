@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <map>
+#include <future>
 #include <chrono>
 #include <onnxruntime_cxx_api.h>
 #include "core/Config.hpp"
@@ -142,11 +143,9 @@ public:
     /**
      * @brief 异步推理
      * @param input_data 输入数据
-     * @param callback 回调函数
-     * @return 成功返回ErrorCode::SUCCESS
+     * @return 包含推理结果的 future，推理失败时 future 会抛出异常
      */
-    core::ErrorCode inferAsync(const std::vector<float>& input_data,
-                               std::function<void(InferenceResult)> callback);
+    std::future<InferenceResult> inferAsync(const std::vector<float>& input_data);
     
     /**
      * @brief 检查模型是否已加载

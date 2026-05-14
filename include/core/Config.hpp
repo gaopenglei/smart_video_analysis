@@ -95,6 +95,7 @@ struct ModelConfig {
     std::string input_name = "images";  ///< 输入节点名称
     std::string output_name = "output0"; ///< 输出节点名称
     std::vector<std::string> class_names; ///< 类别名称列表
+    std::string class_names_file;   ///< 类别名称文件路径（每行一个类别名）
     int num_classes = 80;           ///< 类别数量
     float confidence_threshold = 0.25f; ///< 置信度阈值
     float nms_threshold = 0.45f;    ///< NMS阈值
@@ -108,6 +109,7 @@ struct InferenceConfig {
     bool use_gpu = false;           ///< 是否使用GPU
     int gpu_device_id = 0;          ///< GPU设备ID
     std::string execution_provider = "CPU"; ///< 执行提供器: "CPU", "CUDA", "TensorRT", "OpenVINO", "NNAPI"
+    std::string optimization_level = "all"; ///< 图优化级别: "all", "extended", "basic", "disable"
     bool enable_profiling = false;  ///< 是否启用性能分析
     std::string profiling_output_dir; ///< 性能分析输出目录
     int warmup_iterations = 3;      ///< 预热迭代次数

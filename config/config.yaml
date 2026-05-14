@@ -88,6 +88,9 @@ model:
   
   # 输出节点名称
   output_names: ["output0"]
+  
+  # 类别名称文件路径（每行一个类别名，为空则使用内置 COCO 80 类）
+  class_names_file: "config/coco_classes.txt"
 
 # ------------------------------------------------------------
 # 推理配置
@@ -98,6 +101,9 @@ inference:
   
   # 执行提供者: CPU, CUDA, TensorRT, OpenVINO, NNAPI
   execution_provider: "CPU"
+  
+  # 图优化级别: all, extended, basic, disable
+  optimization_level: "all"
   
   # 设备ID (用于GPU)
   device_id: 0

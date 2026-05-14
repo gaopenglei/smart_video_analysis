@@ -163,12 +163,29 @@ endif()
 # 链接库
 # ============================================================================
 
+# 使用 CMake 标准线程库，跨平台兼容（Windows 不需要 -lpthread）
+find_package(Threads REQUIRED)
+
 target_link_libraries(smart_video_analysis PRIVATE
     ${OpenCV_LIBS}
     ${ONNXRUNTIME_LIB}
-    pthread
-    dl
+    Threads::Threads
 )
+
+# dl 仅在 Unix-like 系统上需要
+if(UNIX)
+    target_link_libraries(smart_video_analysis PRIVATE dl)
+endif()
+
+# Windows：将 onnxruntime.dll 拷贝到可执行文件目录，确保运行时可以找到
+if(WIN32 AND ONNXRUNTIME_DIR)
+    add_custom_command(TARGET smart_video_analysis POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${ONNXRUNTIME_DIR}/lib/onnxruntime.dll"
+            $<TARGET_FILE_DIR:smart_video_analysis>
+        COMMENT "Copying onnxruntime.dll to output directory"
+    )
+endif()
 
 # 添加Protobuf库（如果找到）
 if(Protobuf_FOUND)
@@ -192,7 +209,10 @@ target_compile_definitions(smart_video_analysis PRIVATE
 
 install(TARGETS smart_video_analysis RUNTIME DESTINATION bin)
 install(DIRECTORY config/ DESTINATION etc/smart_video_analysis)
-install(DIRECTORY models/ DESTINATION share/smart_video_analysis/models)
+# models/ 目录为运行时产物（不纳入源码仓库），仅在目录存在时安装
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/models")
+    install(DIRECTORY models/ DESTINATION share/smart_video_analysis/models)
+endif()
 
 # ============================================================================
 # 测试 (可选)

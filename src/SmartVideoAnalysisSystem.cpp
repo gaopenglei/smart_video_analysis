@@ -107,11 +107,15 @@ bool SmartVideoAnalysisSystem::initializeModules() {
     }
     
     // 加载模型
-    if (!inference_engine_->loadModel(config_.model.model_path)) {
+    if (inference_engine_->loadModel(config_.model.model_path) != core::ErrorCode::SUCCESS) {
         LOG_ERROR("Failed to load model: %s", config_.model.model_path.c_str());
         return false;
     }
-    
+
+    // 初始化算子适配器（必须在 checkOperatorSupport 之前完成）
+    const std::string& target_npu = config_.operator_adapter.target_npu;
+    operator_adapter_ = modules::operator_adapter::OperatorAdapterFactory::create(target_npu);
+
     // 检查算子支持性
     if (!checkOperatorSupport(config_.model.model_path)) {
         LOG_WARN("Some operators may not be supported on target NPU");
@@ -133,16 +137,39 @@ bool SmartVideoAnalysisSystem::initializeModules() {
         return false;
     }
     
-    // 初始化算子适配器
-    operator_adapter_ = modules::operator_adapter::OperatorAdapterFactory::create(
-        modules::operator_adapter::NPUType::RK3588);
-    
     LOG_INFO("All modules initialized successfully");
     return true;
 }
 
 void SmartVideoAnalysisSystem::initializeClassNames() {
-    // COCO数据集类别名称
+    // 优先从配置指定的类别文件加载
+    const std::string& names_file = config_.model.class_names_file;
+    if (!names_file.empty()) {
+        std::ifstream fin(names_file);
+        if (fin.is_open()) {
+            class_names_.clear();
+            std::string line;
+            while (std::getline(fin, line)) {
+                // 去除行尾空白字符
+                while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) {
+                    line.pop_back();
+                }
+                if (!line.empty()) {
+                    class_names_.push_back(line);
+                }
+            }
+            LOG_INFO("Loaded %zu class names from: %s",
+                     class_names_.size(), names_file.c_str());
+            if (visualizer_) {
+                visualizer_->setClassNames(class_names_);
+            }
+            return;
+        }
+        LOG_WARN("Cannot open class names file: %s, falling back to built-in COCO names",
+                 names_file.c_str());
+    }
+
+    // 回退：内置 COCO 80 类别名称
     class_names_ = {
         "person", "bicycle", "car", "motorcycle", "airplane",
         "bus", "train", "truck", "boat", "traffic light",
@@ -161,7 +188,7 @@ void SmartVideoAnalysisSystem::initializeClassNames() {
         "toaster", "sink", "refrigerator", "book", "clock",
         "vase", "scissors", "teddy bear", "hair drier", "toothbrush"
     };
-    
+
     if (visualizer_) {
         visualizer_->setClassNames(class_names_);
     }
@@ -296,15 +323,24 @@ core::ErrorCode SmartVideoAnalysisSystem::processFrame(
     
     // 推理
     modules::inference::InferenceResult inference_result;
-    if (!inference_engine_->infer(preprocess_result.input_tensor, inference_result)) {
+    if (inference_engine_->infer(preprocess_result.input_tensor, inference_result)
+            != core::ErrorCode::SUCCESS) {
         LOG_ERROR("Inference failed");
         return core::ErrorCode::INFERENCE_ERROR;
     }
     
-    // 后处理
+    // 后处理：传入预处理缩放参数，确保检测框坐标正确映射回原图空间
     result.original_width = frame.cols;
     result.original_height = frame.rows;
-    
+
+    auto* det_pp = dynamic_cast<modules::postprocessing::DetectionPostprocessor*>(
+        postprocessor_.get());
+    if (det_pp) {
+        det_pp->setOriginalSize(frame.cols, frame.rows);
+        det_pp->setScaleParams(preprocess_result.scale_x, preprocess_result.scale_y,
+                               preprocess_result.pad_x, preprocess_result.pad_y);
+    }
+
     if (!postprocessor_->process(inference_result.outputs, result)) {
         LOG_ERROR("Postprocessing failed");
         return core::ErrorCode::POSTPROCESS_ERROR;
@@ -403,11 +439,17 @@ core::ErrorCode SmartVideoAnalysisSystem::setModel(
         model_type, config_.postprocess);
     
     // 加载新模型
-    if (inference_engine_ && !inference_engine_->loadModel(model_path)) {
+    if (inference_engine_ &&
+        inference_engine_->loadModel(model_path) != core::ErrorCode::SUCCESS) {
         LOG_ERROR("Failed to load model: %s", model_path.c_str());
         return core::ErrorCode::MODEL_LOAD_FAILED;
     }
-    
+
+    // 重新检查新模型的算子支持性
+    if (!checkOperatorSupport(model_path)) {
+        LOG_WARN("Some operators in the new model may not be supported on target NPU");
+    }
+
     LOG_INFO("Model changed: %s (type: %s)", model_path.c_str(), model_type.c_str());
     return core::ErrorCode::SUCCESS;
 }
@@ -495,27 +537,20 @@ void SmartVideoAnalysisSystem::processingLoop() {
             break;
         }
         
-        // 读取帧
+        // 读取帧，并将已读帧直接传入 processSingleFrame，避免二次读取导致帧丢失
         if (!video_input_->readFrame(video_frame)) {
             LOG_WARN("Failed to read frame, retrying...");
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
         
-        // 处理帧
-        processSingleFrame();
+        processSingleFrame(video_frame);
     }
     
     LOG_INFO("Processing loop ended");
 }
 
-bool SmartVideoAnalysisSystem::processSingleFrame() {
-    modules::video_input::VideoFrame video_frame;
-    
-    if (!video_input_->readFrame(video_frame)) {
-        return false;
-    }
-    
+bool SmartVideoAnalysisSystem::processSingleFrame(modules::video_input::VideoFrame& video_frame) {
     auto total_start = std::chrono::high_resolution_clock::now();
     
     // 预处理
@@ -527,19 +562,28 @@ bool SmartVideoAnalysisSystem::processSingleFrame() {
     
     // 推理
     modules::inference::InferenceResult inference_result;
-    if (!inference_engine_->infer(preprocess_result.input_tensor, inference_result)) {
+    if (inference_engine_->infer(preprocess_result.input_tensor, inference_result)
+            != core::ErrorCode::SUCCESS) {
         LOG_ERROR("Inference failed");
         return false;
     }
     
-    // 后处理
+    // 后处理：传入预处理缩放参数，确保检测框坐标正确映射回原图空间
     postprocessing::DetectionResult result;
     result.frame_id = video_frame.frame_id;
     result.timestamp_ms = video_frame.timestamp_ms;
     result.original_width = video_frame.width;
     result.original_height = video_frame.height;
     result.inference_time_ms = inference_result.inference_time_ms;
-    
+
+    auto* det_pp = dynamic_cast<modules::postprocessing::DetectionPostprocessor*>(
+        postprocessor_.get());
+    if (det_pp) {
+        det_pp->setOriginalSize(video_frame.width, video_frame.height);
+        det_pp->setScaleParams(preprocess_result.scale_x, preprocess_result.scale_y,
+                               preprocess_result.pad_x, preprocess_result.pad_y);
+    }
+
     if (!postprocessor_->process(inference_result.outputs, result)) {
         LOG_ERROR("Postprocessing failed");
         return false;

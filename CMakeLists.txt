@@ -69,6 +69,41 @@ set(ONNX_INCLUDE_DIR "" CACHE PATH "Path to ONNX include directory")
 set(ONNX_LIB_DIR "" CACHE PATH "Path to ONNX library directory")
 
 # ============================================================================
+# RKNN Runtime 支持（可选）
+# 在 RK3588 等瑞芯微设备上启用：
+#   cmake -DUSE_RKNN=ON -DRKNN_DIR=/path/to/rknn-toolkit2/runtime/Linux/librknn_api ..
+# ============================================================================
+option(USE_RKNN "Enable RKNN Runtime inference backend (for RK3588)" OFF)
+if(USE_RKNN)
+    set(RKNN_DIR "" CACHE PATH "Path to RKNN Runtime directory (contains include/ and lib/)")
+    if(RKNN_DIR)
+        set(RKNN_INCLUDE_DIR "${RKNN_DIR}/include")
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
+            set(RKNN_LIB "${RKNN_DIR}/lib/librknnrt.so")
+        else()
+            set(RKNN_LIB "${RKNN_DIR}/lib/librknnrt.so")
+            message(WARNING "USE_RKNN is ON but target is not aarch64. "
+                            "RKNN Runtime only runs on ARM Linux / RK3588.")
+        endif()
+    else()
+        find_path(RKNN_INCLUDE_DIR  NAMES rknn_api.h
+                  PATHS /usr/include /usr/local/include)
+        find_library(RKNN_LIB NAMES rknnrt
+                     PATHS /usr/lib /usr/local/lib)
+    endif()
+
+    if(RKNN_INCLUDE_DIR AND RKNN_LIB)
+        message(STATUS "RKNN Runtime include: ${RKNN_INCLUDE_DIR}")
+        message(STATUS "RKNN Runtime library: ${RKNN_LIB}")
+        add_definitions(-DUSE_RKNN)
+    else()
+        message(FATAL_ERROR
+            "USE_RKNN=ON but rknn_api.h / librknnrt.so not found. "
+            "Set -DRKNN_DIR=<path> to the RKNN Runtime SDK directory.")
+    endif()
+endif()
+
+# ============================================================================
 # 源文件定义
 # ============================================================================
 
@@ -94,9 +129,10 @@ set(MODEL_PROCESSOR_SOURCES
     src/modules/model_processor/ModelProcessor.cpp
 )
 
-# 推理模块
+# 推理模块（ORT 始终编译；RKNN 始终编译，但 USE_RKNN 未定义时为空实现）
 set(INFERENCE_SOURCES
     src/modules/inference/InferenceEngine.cpp
+    src/modules/inference/RKNNInferenceEngine.cpp
 )
 
 # 后处理模块
@@ -159,6 +195,11 @@ if(Protobuf_INCLUDE_DIRS)
     target_include_directories(smart_video_analysis PRIVATE ${Protobuf_INCLUDE_DIRS})
 endif()
 
+# 添加 RKNN 包含目录（如果启用）
+if(USE_RKNN AND RKNN_INCLUDE_DIR)
+    target_include_directories(smart_video_analysis PRIVATE ${RKNN_INCLUDE_DIR})
+endif()
+
 # ============================================================================
 # 链接库
 # ============================================================================
@@ -192,6 +233,11 @@ if(Protobuf_FOUND)
     target_link_libraries(smart_video_analysis PRIVATE ${Protobuf_LIBRARIES})
 elseif(PROTOBUF_LIB)
     target_link_libraries(smart_video_analysis PRIVATE ${PROTOBUF_LIB})
+endif()
+
+# 链接 RKNN Runtime（如果启用）
+if(USE_RKNN AND RKNN_LIB)
+    target_link_libraries(smart_video_analysis PRIVATE ${RKNN_LIB})
 endif()
 
 # ============================================================================
@@ -238,6 +284,7 @@ message(STATUS "ONNX Runtime: ${ONNXRUNTIME_LIB}")
 if(Protobuf_FOUND)
     message(STATUS "Protobuf: ${Protobuf_VERSION}")
 endif()
+message(STATUS "RKNN backend: ${USE_RKNN} (lib: ${RKNN_LIB})")
 message(STATUS "ARM build: ${ARM_BUILD}")
 message(STATUS "==============================================================")
 message(STATUS "")

@@ -1,11 +1,19 @@
 /**
  * @file InferenceEngine.cpp
- * @brief ONNX Runtime推理引擎实现文件
+ * @brief ONNX Runtime 推理引擎实现
+ *
+ * 所有 ORT 头文件和 ORT 具体类型只在此文件中出现，不会泄漏到上层。
+ * 切换推理后端时，只需替换此文件（及对应头文件中的实现类）。
  */
 
+// ORT 头文件仅在此 .cpp 中引入，彻底隔离于上层代码
+#include <onnxruntime_cxx_api.h>
+
 #include "modules/inference/InferenceEngine.hpp"
+#include "modules/inference/RKNNInferenceEngine.hpp"
 #include "core/Logger.hpp"
 #include <algorithm>
+#include <chrono>
 #include <future>
 #include <numeric>
 #include <cstring>
@@ -16,34 +24,105 @@ namespace modules {
 namespace inference {
 
 // ============================================================================
+// pImpl：将所有 ORT 具体类型隐藏在此结构体中
+// ============================================================================
+
+struct OnnxInferenceEngine::Impl {
+    std::unique_ptr<Ort::Env>     env;
+    std::unique_ptr<Ort::Session> session;
+    std::unique_ptr<Ort::AllocatorWithDefaultOptions> allocator;
+
+    std::vector<TensorInfo>   input_infos;
+    std::vector<TensorInfo>   output_infos;
+    std::vector<std::string>  input_names;
+    std::vector<std::string>  output_names;
+    std::vector<const char*>  input_name_ptrs;
+    std::vector<const char*>  output_name_ptrs;
+
+    // ----------------------------------------------------------------
+    // ORT 数据类型 → 通用 TensorDataType 的转换
+    // ----------------------------------------------------------------
+    static TensorDataType fromOrtType(ONNXTensorElementDataType t) {
+        switch (t) {
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:   return TensorDataType::FLOAT32;
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16: return TensorDataType::FLOAT16;
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:    return TensorDataType::INT8;
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:   return TensorDataType::UINT8;
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:   return TensorDataType::INT16;
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:   return TensorDataType::INT32;
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:   return TensorDataType::INT64;
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:    return TensorDataType::BOOL;
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_STRING:  return TensorDataType::STRING;
+            default:                                     return TensorDataType::UNKNOWN;
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // 提取模型输入输出元信息
+    // ----------------------------------------------------------------
+    void extractModelInfo() {
+        size_t num_inputs = session->GetInputCount();
+        input_infos.resize(num_inputs);
+        input_names.resize(num_inputs);
+        input_name_ptrs.resize(num_inputs);
+
+        for (size_t i = 0; i < num_inputs; ++i) {
+            auto name_ptr = session->GetInputNameAllocated(i, *allocator);
+            input_names[i] = name_ptr.get();
+            input_name_ptrs[i] = input_names[i].c_str();
+
+            auto type_info  = session->GetInputTypeInfo(i);
+            auto tensor_inf = type_info.GetTensorTypeAndShapeInfo();
+
+            input_infos[i].name          = input_names[i];
+            input_infos[i].type          = fromOrtType(tensor_inf.GetElementType());
+            input_infos[i].shape         = tensor_inf.GetShape();
+            input_infos[i].element_count = tensor_inf.GetElementCount();
+            input_infos[i].byte_size     = input_infos[i].element_count * sizeof(float);
+        }
+
+        size_t num_outputs = session->GetOutputCount();
+        output_infos.resize(num_outputs);
+        output_names.resize(num_outputs);
+        output_name_ptrs.resize(num_outputs);
+
+        for (size_t i = 0; i < num_outputs; ++i) {
+            auto name_ptr = session->GetOutputNameAllocated(i, *allocator);
+            output_names[i] = name_ptr.get();
+            output_name_ptrs[i] = output_names[i].c_str();
+
+            auto type_info  = session->GetOutputTypeInfo(i);
+            auto tensor_inf = type_info.GetTensorTypeAndShapeInfo();
+
+            output_infos[i].name          = output_names[i];
+            output_infos[i].type          = fromOrtType(tensor_inf.GetElementType());
+            output_infos[i].shape         = tensor_inf.GetShape();
+            output_infos[i].element_count = tensor_inf.GetElementCount();
+            output_infos[i].byte_size     = output_infos[i].element_count * sizeof(float);
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // 创建单个输入张量
+    // ----------------------------------------------------------------
+    Ort::Value createInputTensor(const std::vector<float>& data, int index) {
+        auto mem_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+        return Ort::Value::CreateTensor<float>(
+            mem_info,
+            const_cast<float*>(data.data()),
+            data.size(),
+            input_infos[index].shape.data(),
+            input_infos[index].shape.size());
+    }
+};
+
+// ============================================================================
 // OnnxInferenceEngine 实现
 // ============================================================================
 
 OnnxInferenceEngine::OnnxInferenceEngine(const core::InferenceConfig& config)
-    : config_(config), execution_provider_(ExecutionProvider::CPU) {
-    
-    // 根据配置设置执行提供者
-    std::string provider = config_.execution_provider;
-    std::transform(provider.begin(), provider.end(), provider.begin(), ::tolower);
-    
-    if (provider == "cuda") {
-        execution_provider_ = ExecutionProvider::CUDA;
-    } else if (provider == "tensorrt") {
-        execution_provider_ = ExecutionProvider::TensorRT;
-    } else if (provider == "openvino") {
-        execution_provider_ = ExecutionProvider::OpenVINO;
-    } else if (provider == "nnapi") {
-        execution_provider_ = ExecutionProvider::NNAPI;
-    } else if (provider == "coreml") {
-        execution_provider_ = ExecutionProvider::CoreML;
-    } else if (provider == "rockchip" || provider == "rk3588" || provider == "npu") {
-        execution_provider_ = ExecutionProvider::RockchipNPU;
-    } else {
-        execution_provider_ = ExecutionProvider::CPU;
-    }
-    
-    LOG_DEBUG("OnnxInferenceEngine created with provider: %s", 
-              InferenceEngineFactory::getProviderName(execution_provider_).c_str());
+    : impl_(std::make_unique<Impl>()), config_(config) {
+    LOG_DEBUG("OnnxInferenceEngine created (backend: OnnxRuntime)");
 }
 
 OnnxInferenceEngine::~OnnxInferenceEngine() {
@@ -52,153 +131,114 @@ OnnxInferenceEngine::~OnnxInferenceEngine() {
 
 bool OnnxInferenceEngine::initializeEnvironment() {
     try {
-        // 创建ONNX Runtime环境
-        OrtLoggingLevel log_level = verbose_ ? ORT_LOGGING_LEVEL_VERBOSE : ORT_LOGGING_LEVEL_WARNING;
-        env_ = std::make_unique<Ort::Env>(log_level, "SmartVideoAnalysis");
-        
-        // 创建默认分配器
-        allocator_ = std::make_unique<Ort::AllocatorWithDefaultOptions>();
-        
+        OrtLoggingLevel log_level =
+            verbose_ ? ORT_LOGGING_LEVEL_VERBOSE : ORT_LOGGING_LEVEL_WARNING;
+        impl_->env       = std::make_unique<Ort::Env>(log_level, "SmartVideoAnalysis");
+        impl_->allocator = std::make_unique<Ort::AllocatorWithDefaultOptions>();
         return true;
     } catch (const Ort::Exception& e) {
-        LOG_ERROR("Failed to initialize ONNX Runtime environment: %s", e.what());
+        LOG_ERROR("Failed to initialize ORT environment: %s", e.what());
         return false;
     }
 }
 
-Ort::SessionOptions OnnxInferenceEngine::createSessionOptions() {
-    Ort::SessionOptions options;
-    
-    // 设置线程数
-    options.SetIntraOpNumThreads(config_.num_threads);
-    options.SetInterOpNumThreads(config_.num_threads);
-    
-    // 设置图优化级别
-    OrtGraphOptimizationLevel opt_level = ORT_DISABLE_ALL;
-    if (config_.optimization_level == "all") {
-        opt_level = ORT_ENABLE_ALL;
-    } else if (config_.optimization_level == "basic") {
-        opt_level = ORT_ENABLE_BASIC;
-    } else if (config_.optimization_level == "extended") {
-        opt_level = ORT_ENABLE_EXTENDED;
-    }
-    options.SetGraphOptimizationLevel(opt_level);
-    
-    // 配置执行提供者
-    configureExecutionProvider(options);
-    
-    return options;
+// ----------------------------------------------------------------
+// 图优化级别映射
+// ----------------------------------------------------------------
+static OrtGraphOptimizationLevel parseOptLevel(const std::string& level) {
+    if (level == "all")      return ORT_ENABLE_ALL;
+    if (level == "extended") return ORT_ENABLE_EXTENDED;
+    if (level == "basic")    return ORT_ENABLE_BASIC;
+    return ORT_DISABLE_ALL;
 }
 
-void OnnxInferenceEngine::configureExecutionProvider(Ort::SessionOptions& options) {
-    switch (execution_provider_) {
-        case ExecutionProvider::CUDA: {
+// ----------------------------------------------------------------
+// 执行提供者配置（仅在 ORT 后端内部使用）
+// ----------------------------------------------------------------
+static void configureProvider(Ort::SessionOptions& opts,
+                              const std::string& provider,
+                              const core::InferenceConfig& cfg) {
+    std::string p = provider;
+    std::transform(p.begin(), p.end(), p.begin(), ::tolower);
+
+    if (p == "cuda") {
 #ifdef USE_CUDA
-            OrtCUDAProviderOptions cuda_options;
-            cuda_options.device_id = config_.gpu_device_id;
-            cuda_options.arena_extend_strategy = 0;
-            cuda_options.gpu_mem_limit = 2 * 1024 * 1024 * 1024; // 2GB
-            cuda_options.cudnn_conv_algo_search = OrtCudnnConvAlgoSearch::OrtCudnnConvAlgoSearchExhaustive;
-            cuda_options.do_copy_in_default_stream = true;
-            
-            options.AppendExecutionProvider_CUDA(cuda_options);
-            LOG_INFO("CUDA execution provider configured (device_id=%d)", config_.gpu_device_id);
+        OrtCUDAProviderOptions cuda_opts{};
+        cuda_opts.device_id = cfg.gpu_device_id;
+        cuda_opts.gpu_mem_limit = static_cast<size_t>(2) * 1024 * 1024 * 1024;
+        opts.AppendExecutionProvider_CUDA(cuda_opts);
+        LOG_INFO("ORT CUDA provider configured (device=%d)", cfg.gpu_device_id);
 #else
-            LOG_WARN("CUDA provider not available, falling back to CPU");
-            execution_provider_ = ExecutionProvider::CPU;
+        LOG_WARN("ORT CUDA provider not compiled in, falling back to CPU");
 #endif
-            break;
-        }
-        
-        case ExecutionProvider::TensorRT: {
+    } else if (p == "tensorrt") {
 #ifdef USE_TENSORRT
-            OrtTensorRTProviderOptions trt_options;
-            trt_options.device_id = config_.gpu_device_id;
-            trt_options.trt_max_workspace_size = 1 * 1024 * 1024 * 1024; // 1GB
-            trt_options.trt_fp16_enable = true;
-            
-            options.AppendExecutionProvider_TensorRT(trt_options);
-            LOG_INFO("TensorRT execution provider configured");
+        OrtTensorRTProviderOptions trt_opts{};
+        trt_opts.device_id = cfg.gpu_device_id;
+        trt_opts.trt_max_workspace_size = 1ULL * 1024 * 1024 * 1024;
+        trt_opts.trt_fp16_enable = 1;
+        opts.AppendExecutionProvider_TensorRT(trt_opts);
+        LOG_INFO("ORT TensorRT provider configured");
 #else
-            LOG_WARN("TensorRT provider not available, falling back to CPU");
-            execution_provider_ = ExecutionProvider::CPU;
+        LOG_WARN("ORT TensorRT provider not compiled in, falling back to CPU");
 #endif
-            break;
-        }
-        
-        case ExecutionProvider::OpenVINO: {
+    } else if (p == "openvino") {
 #ifdef USE_OPENVINO
-            OrtOpenVINOProviderOptions ov_options;
-            ov_options.device_type = "CPU"; // or "GPU", "MYRIAD"
-            
-            options.AppendExecutionProvider_OpenVINO(ov_options);
-            LOG_INFO("OpenVINO execution provider configured");
+        OrtOpenVINOProviderOptions ov_opts{};
+        ov_opts.device_type = "CPU";
+        opts.AppendExecutionProvider_OpenVINO(ov_opts);
+        LOG_INFO("ORT OpenVINO provider configured");
 #else
-            LOG_WARN("OpenVINO provider not available, falling back to CPU");
-            execution_provider_ = ExecutionProvider::CPU;
+        LOG_WARN("ORT OpenVINO provider not compiled in, falling back to CPU");
 #endif
-            break;
-        }
-        
-        case ExecutionProvider::NNAPI: {
+    } else if (p == "nnapi") {
 #ifdef USE_NNAPI
-            OrtNNAPIProviderOptions nnapi_options;
-            options.AppendExecutionProvider_NNAPI(nnapi_options);
-            LOG_INFO("NNAPI execution provider configured");
+        opts.AppendExecutionProvider_NNAPI(0);
+        LOG_INFO("ORT NNAPI provider configured");
 #else
-            LOG_WARN("NNAPI provider not available, falling back to CPU");
-            execution_provider_ = ExecutionProvider::CPU;
+        LOG_WARN("ORT NNAPI provider not compiled in, falling back to CPU");
 #endif
-            break;
-        }
-        
-        case ExecutionProvider::RockchipNPU: {
-            // 瑞芯微RK3588 NPU通常通过RKNN或自定义后端支持
-            // 这里需要根据实际的RKNN-ONNX Runtime集成来配置
-            LOG_INFO("Rockchip NPU execution provider - using custom configuration");
-            // 可能需要使用RKNN Toolkit进行模型转换
-            break;
-        }
-        
-        default:
-            // CPU执行提供者是默认的，不需要额外配置
-            LOG_INFO("Using CPU execution provider with %d threads", config_.num_threads);
-            break;
+    } else {
+        LOG_INFO("ORT CPU provider, threads=%d", cfg.num_threads);
     }
 }
 
 core::ErrorCode OnnxInferenceEngine::loadModel(const std::string& model_path) {
     std::lock_guard<std::mutex> lock(mutex_);
-    
+
     if (model_loaded_) {
-        LOG_WARN("Model already loaded, unloading previous model");
+        LOG_WARN("Model already loaded, unloading previous model first");
         unloadModel();
     }
-    
+
     LOG_INFO("Loading ONNX model: %s", model_path.c_str());
-    
-    // 初始化环境
+
     if (!initializeEnvironment()) {
         return core::ErrorCode::MODEL_LOAD_FAILED;
     }
-    
+
     try {
-        // 创建会话选项
-        Ort::SessionOptions options = createSessionOptions();
-        
-        // 创建会话
-        session_ = std::make_unique<Ort::Session>(*env_, model_path.c_str(), options);
-        
-        // 提取模型信息
-        extractModelInfo();
-        
+        Ort::SessionOptions opts;
+        opts.SetIntraOpNumThreads(config_.num_threads);
+        opts.SetInterOpNumThreads(config_.num_threads);
+        opts.SetGraphOptimizationLevel(parseOptLevel(config_.optimization_level));
+
+        if (config_.enable_memory_pattern) {
+            opts.EnableMemPattern();
+        }
+
+        configureProvider(opts, config_.execution_provider, config_);
+
+        impl_->session = std::make_unique<Ort::Session>(
+            *impl_->env, model_path.c_str(), opts);
+
+        impl_->extractModelInfo();
         model_loaded_ = true;
-        
-        LOG_INFO("Model loaded successfully");
+
+        LOG_INFO("ONNX model loaded successfully");
         printModelInfo();
-        
         return core::ErrorCode::SUCCESS;
-        
+
     } catch (const Ort::Exception& e) {
         LOG_ERROR("Failed to load model: %s", e.what());
         return core::ErrorCode::MODEL_LOAD_FAILED;
@@ -206,162 +246,93 @@ core::ErrorCode OnnxInferenceEngine::loadModel(const std::string& model_path) {
 }
 
 void OnnxInferenceEngine::unloadModel() {
-    session_.reset();
-    allocator_.reset();
-    env_.reset();
-    
-    input_infos_.clear();
-    output_infos_.clear();
-    input_names_.clear();
-    output_names_.clear();
-    input_name_ptrs_.clear();
-    output_name_ptrs_.clear();
-    
+    impl_->session.reset();
+    impl_->allocator.reset();
+    impl_->env.reset();
+    impl_->input_infos.clear();
+    impl_->output_infos.clear();
+    impl_->input_names.clear();
+    impl_->output_names.clear();
+    impl_->input_name_ptrs.clear();
+    impl_->output_name_ptrs.clear();
     model_loaded_ = false;
-    
-    LOG_DEBUG("Model unloaded");
+    LOG_DEBUG("ONNX model unloaded");
 }
 
-void OnnxInferenceEngine::extractModelInfo() {
-    // 获取输入信息
-    size_t num_inputs = session_->GetInputCount();
-    input_infos_.resize(num_inputs);
-    input_names_.resize(num_inputs);
-    input_name_ptrs_.resize(num_inputs);
-    
-    for (size_t i = 0; i < num_inputs; ++i) {
-        // 获取输入名称
-        Ort::AllocatedStringPtr name = session_->GetInputNameAllocated(i, *allocator_);
-        input_names_[i] = name.get();
-        input_name_ptrs_[i] = input_names_[i].c_str();
-        
-        // 获取输入类型和形状
-        Ort::TypeInfo type_info = session_->GetInputTypeInfo(i);
-        auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
-        
-        input_infos_[i].name = input_names_[i];
-        input_infos_[i].type = tensor_info.GetElementType();
-        input_infos_[i].shape = tensor_info.GetShape();
-        input_infos_[i].element_count = tensor_info.GetElementCount();
-        input_infos_[i].byte_size = tensor_info.GetElementCount() * sizeof(float);
-    }
-    
-    // 获取输出信息
-    size_t num_outputs = session_->GetOutputCount();
-    output_infos_.resize(num_outputs);
-    output_names_.resize(num_outputs);
-    output_name_ptrs_.resize(num_outputs);
-    
-    for (size_t i = 0; i < num_outputs; ++i) {
-        // 获取输出名称
-        Ort::AllocatedStringPtr name = session_->GetOutputNameAllocated(i, *allocator_);
-        output_names_[i] = name.get();
-        output_name_ptrs_[i] = output_names_[i].c_str();
-        
-        // 获取输出类型和形状
-        Ort::TypeInfo type_info = session_->GetOutputTypeInfo(i);
-        auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
-        
-        output_infos_[i].name = output_names_[i];
-        output_infos_[i].type = tensor_info.GetElementType();
-        output_infos_[i].shape = tensor_info.GetShape();
-        output_infos_[i].element_count = tensor_info.GetElementCount();
-        output_infos_[i].byte_size = tensor_info.GetElementCount() * sizeof(float);
-    }
+bool OnnxInferenceEngine::isModelLoaded() const {
+    return model_loaded_;
 }
 
-Ort::Value OnnxInferenceEngine::createInputTensor(const std::vector<float>& data, int index) {
-    const auto& info = input_infos_[index];
-    
-    // 创建张量
-    Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(
-        OrtArenaAllocator, OrtMemTypeDefault);
-    
-    return Ort::Value::CreateTensor<float>(
-        memory_info,
-        const_cast<float*>(data.data()),
-        data.size(),
-        info.shape.data(),
-        info.shape.size()
-    );
-}
-
-std::vector<Ort::Value> OnnxInferenceEngine::createInputTensors(
-    const std::vector<std::vector<float>>& input_data) {
-    
-    std::vector<Ort::Value> tensors;
-    tensors.reserve(input_data.size());
-    
-    for (size_t i = 0; i < input_data.size(); ++i) {
-        tensors.push_back(createInputTensor(input_data[i], static_cast<int>(i)));
-    }
-    
-    return tensors;
-}
-
+// ----------------------------------------------------------------
+// 同步推理（单输入）
+// ----------------------------------------------------------------
 core::ErrorCode OnnxInferenceEngine::infer(const std::vector<float>& input_data,
                                             InferenceResult& result) {
     return infer(std::vector<std::vector<float>>{input_data}, result);
 }
 
+// ----------------------------------------------------------------
+// 同步推理（多输入）
+// ----------------------------------------------------------------
 core::ErrorCode OnnxInferenceEngine::infer(
     const std::vector<std::vector<float>>& input_data,
     InferenceResult& result) {
-    
+
     if (!model_loaded_) {
         LOG_ERROR("Model not loaded");
         return core::ErrorCode::MODEL_NOT_INITIALIZED;
     }
-    
+
     std::lock_guard<std::mutex> lock(mutex_);
-    
-    auto start_time = std::chrono::high_resolution_clock::now();
-    
+    auto start = std::chrono::high_resolution_clock::now();
+
     try {
-        // 创建输入张量
-        std::vector<Ort::Value> input_tensors = createInputTensors(input_data);
-        
+        // 构建输入张量
+        std::vector<Ort::Value> input_tensors;
+        input_tensors.reserve(input_data.size());
+        for (size_t i = 0; i < input_data.size(); ++i) {
+            input_tensors.push_back(
+                impl_->createInputTensor(input_data[i], static_cast<int>(i)));
+        }
+
         // 执行推理
-        auto output_tensors = session_->Run(
+        auto output_tensors = impl_->session->Run(
             Ort::RunOptions{nullptr},
-            input_name_ptrs_.data(),
+            impl_->input_name_ptrs.data(),
             input_tensors.data(),
             input_tensors.size(),
-            output_name_ptrs_.data(),
-            output_name_ptrs_.size()
-        );
-        
-        // 提取输出数据
+            impl_->output_name_ptrs.data(),
+            impl_->output_name_ptrs.size());
+
+        // 提取输出（统一转换为 float32 向量）
         result.outputs.resize(output_tensors.size());
-        result.output_infos = output_infos_;
-        
+        result.output_infos = impl_->output_infos;
+
         for (size_t i = 0; i < output_tensors.size(); ++i) {
-            const auto& tensor = output_tensors[i];
-            auto tensor_info = tensor.GetTensorTypeAndShapeInfo();
-            size_t element_count = tensor_info.GetElementCount();
-            
-            float* data = const_cast<float*>(tensor.GetTensorData<float>());
-            result.outputs[i].assign(data, data + element_count);
+            auto info   = output_tensors[i].GetTensorTypeAndShapeInfo();
+            size_t count = info.GetElementCount();
+            const float* data = output_tensors[i].GetTensorData<float>();
+            result.outputs[i].assign(data, data + count);
         }
-        
-        // 计算推理时间
-        auto end_time = std::chrono::high_resolution_clock::now();
-        result.inference_time_ms = std::chrono::duration<double, std::milli>(
-            end_time - start_time).count();
+
+        auto end = std::chrono::high_resolution_clock::now();
+        result.inference_time_ms =
+            std::chrono::duration<double, std::milli>(end - start).count();
         result.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
-        
-        // 更新统计
+
         stats_.update(result.inference_time_ms);
-        
         return core::ErrorCode::SUCCESS;
-        
+
     } catch (const Ort::Exception& e) {
         LOG_ERROR("Inference failed: %s", e.what());
         return core::ErrorCode::INFERENCE_ERROR;
     }
 }
 
+// ----------------------------------------------------------------
+// 异步推理
+// ----------------------------------------------------------------
 std::future<InferenceResult> OnnxInferenceEngine::inferAsync(
     const std::vector<float>& input_data) {
 
@@ -369,182 +340,165 @@ std::future<InferenceResult> OnnxInferenceEngine::inferAsync(
         InferenceResult result;
         core::ErrorCode ret = this->infer(input_data, result);
         if (ret != core::ErrorCode::SUCCESS) {
-            throw std::runtime_error("Async inference failed with error code: " +
-                                     std::to_string(static_cast<int>(ret)));
+            throw std::runtime_error(
+                "Async inference failed, error code: " +
+                std::to_string(static_cast<int>(ret)));
         }
         return result;
     });
 }
 
-bool OnnxInferenceEngine::isModelLoaded() const {
-    return model_loaded_;
-}
-
+// ----------------------------------------------------------------
+// 元信息访问
+// ----------------------------------------------------------------
 const std::vector<TensorInfo>& OnnxInferenceEngine::getInputInfos() const {
-    return input_infos_;
+    return impl_->input_infos;
 }
-
 const std::vector<TensorInfo>& OnnxInferenceEngine::getOutputInfos() const {
-    return output_infos_;
+    return impl_->output_infos;
 }
-
 std::vector<int64_t> OnnxInferenceEngine::getInputShape(int index) const {
-    if (index >= 0 && index < static_cast<int>(input_infos_.size())) {
-        return input_infos_[index].shape;
+    if (index >= 0 && index < static_cast<int>(impl_->input_infos.size())) {
+        return impl_->input_infos[index].shape;
     }
     return {};
 }
-
 std::vector<int64_t> OnnxInferenceEngine::getOutputShape(int index) const {
-    if (index >= 0 && index < static_cast<int>(output_infos_.size())) {
-        return output_infos_[index].shape;
+    if (index >= 0 && index < static_cast<int>(impl_->output_infos.size())) {
+        return impl_->output_infos[index].shape;
     }
     return {};
-}
-
-const InferenceStats& OnnxInferenceEngine::getStats() const {
-    return stats_;
-}
-
-void OnnxInferenceEngine::resetStats() {
-    stats_ = InferenceStats();
-}
-
-void OnnxInferenceEngine::setExecutionProvider(ExecutionProvider provider) {
-    execution_provider_ = provider;
-}
-
-ExecutionProvider OnnxInferenceEngine::getExecutionProvider() const {
-    return execution_provider_;
-}
-
-void OnnxInferenceEngine::setNumThreads(int num_threads) {
-    config_.num_threads = num_threads;
-}
-
-void OnnxInferenceEngine::setGpuDeviceId(int device_id) {
-    config_.gpu_device_id = device_id;
-}
-
-void OnnxInferenceEngine::setVerbose(bool verbose) {
-    verbose_ = verbose;
 }
 
 std::map<std::string, std::string> OnnxInferenceEngine::getModelMetadata() const {
-    std::map<std::string, std::string> metadata;
-    
-    if (!model_loaded_) {
-        return metadata;
-    }
-    
+    std::map<std::string, std::string> meta;
+    if (!model_loaded_) return meta;
     try {
-        Ort::ModelMetadata model_metadata = session_->GetModelMetadata();
-        
-        // 获取生产者名称
-        auto producer_name = model_metadata.GetProducerNameAllocated(*allocator_);
-        metadata["producer_name"] = producer_name.get();
-        
-        // 获取图名称
-        auto graph_name = model_metadata.GetGraphNameAllocated(*allocator_);
-        metadata["graph_name"] = graph_name.get();
-        
-        // 获取域
-        auto domain = model_metadata.GetDomainAllocated(*allocator_);
-        metadata["domain"] = domain.get();
-        
-        // 获取描述
-        auto description = model_metadata.GetDescriptionAllocated(*allocator_);
-        metadata["description"] = description.get();
-        
+        auto m = impl_->session->GetModelMetadata();
+        meta["producer_name"] = m.GetProducerNameAllocated(*impl_->allocator).get();
+        meta["graph_name"]    = m.GetGraphNameAllocated(*impl_->allocator).get();
+        meta["domain"]        = m.GetDomainAllocated(*impl_->allocator).get();
+        meta["description"]   = m.GetDescriptionAllocated(*impl_->allocator).get();
     } catch (const Ort::Exception& e) {
         LOG_WARN("Failed to get model metadata: %s", e.what());
     }
-    
-    return metadata;
+    return meta;
 }
 
+// ----------------------------------------------------------------
+// 性能统计与调试
+// ----------------------------------------------------------------
+const InferenceStats& OnnxInferenceEngine::getStats() const { return stats_; }
+void OnnxInferenceEngine::resetStats() { stats_ = InferenceStats{}; }
+void OnnxInferenceEngine::setVerbose(bool verbose) { verbose_ = verbose; }
+void OnnxInferenceEngine::setNumThreads(int n) { config_.num_threads = n; }
+void OnnxInferenceEngine::setGpuDeviceId(int id) { config_.gpu_device_id = id; }
+
 void OnnxInferenceEngine::printModelInfo() const {
-    LOG_INFO("========== Model Information ==========");
-    
-    // 输入信息
-    LOG_INFO("Inputs:");
-    for (const auto& info : input_infos_) {
-        std::string shape_str;
+    LOG_INFO("===== OnnxRuntime Model Info =====");
+    for (const auto& info : impl_->input_infos) {
+        std::string shape;
         for (size_t i = 0; i < info.shape.size(); ++i) {
-            shape_str += std::to_string(info.shape[i]);
-            if (i < info.shape.size() - 1) shape_str += "x";
+            shape += std::to_string(info.shape[i]);
+            if (i + 1 < info.shape.size()) shape += "x";
         }
-        LOG_INFO("  %s: [%s], elements=%zu", 
-                 info.name.c_str(), shape_str.c_str(), info.element_count);
+        LOG_INFO("  Input  %s: [%s]", info.name.c_str(), shape.c_str());
     }
-    
-    // 输出信息
-    LOG_INFO("Outputs:");
-    for (const auto& info : output_infos_) {
-        std::string shape_str;
+    for (const auto& info : impl_->output_infos) {
+        std::string shape;
         for (size_t i = 0; i < info.shape.size(); ++i) {
-            shape_str += std::to_string(info.shape[i]);
-            if (i < info.shape.size() - 1) shape_str += "x";
+            shape += std::to_string(info.shape[i]);
+            if (i + 1 < info.shape.size()) shape += "x";
         }
-        LOG_INFO("  %s: [%s], elements=%zu", 
-                 info.name.c_str(), shape_str.c_str(), info.element_count);
+        LOG_INFO("  Output %s: [%s]", info.name.c_str(), shape.c_str());
     }
-    
-    LOG_INFO("Execution Provider: %s", 
-             InferenceEngineFactory::getProviderName(execution_provider_).c_str());
-    LOG_INFO("========================================");
+    LOG_INFO("  Provider: %s, Threads: %d, OptLevel: %s",
+             config_.execution_provider.c_str(),
+             config_.num_threads,
+             config_.optimization_level.c_str());
+    LOG_INFO("==================================");
 }
 
 // ============================================================================
 // InferenceEngineFactory 实现
 // ============================================================================
 
-std::unique_ptr<OnnxInferenceEngine> InferenceEngineFactory::create(
-    const core::InferenceConfig& config) {
-    return std::make_unique<OnnxInferenceEngine>(config);
+InferenceBackend InferenceEngineFactory::parseBackend(const std::string& name) {
+    std::string n = name;
+    std::transform(n.begin(), n.end(), n.begin(), ::tolower);
+    if (n == "onnxruntime" || n == "ort") return InferenceBackend::OnnxRuntime;
+    if (n == "tensorrt"    || n == "trt") return InferenceBackend::TensorRT;
+    if (n == "rknn")                      return InferenceBackend::RKNN;
+    if (n == "openvino")                  return InferenceBackend::OpenVINO;
+    if (n == "coreml")                    return InferenceBackend::CoreML;
+    return InferenceBackend::Auto;
 }
 
-std::vector<ExecutionProvider> InferenceEngineFactory::getAvailableProviders() {
-    std::vector<ExecutionProvider> providers;
-    
-    // CPU始终可用
-    providers.push_back(ExecutionProvider::CPU);
-    
-#ifdef USE_CUDA
-    providers.push_back(ExecutionProvider::CUDA);
-#endif
+std::string InferenceEngineFactory::getBackendName(InferenceBackend backend) {
+    switch (backend) {
+        case InferenceBackend::OnnxRuntime: return "OnnxRuntime";
+        case InferenceBackend::TensorRT:    return "TensorRT";
+        case InferenceBackend::RKNN:        return "RKNN";
+        case InferenceBackend::OpenVINO:    return "OpenVINO";
+        case InferenceBackend::CoreML:      return "CoreML";
+        default:                            return "Auto";
+    }
+}
+
+bool InferenceEngineFactory::isBackendAvailable(InferenceBackend backend) {
+    switch (backend) {
+        case InferenceBackend::OnnxRuntime: return true;  // 始终编译
 #ifdef USE_TENSORRT
-    providers.push_back(ExecutionProvider::TensorRT);
+        case InferenceBackend::TensorRT:    return true;
+#endif
+#ifdef USE_RKNN
+        case InferenceBackend::RKNN:        return true;
 #endif
 #ifdef USE_OPENVINO
-    providers.push_back(ExecutionProvider::OpenVINO);
+        case InferenceBackend::OpenVINO:    return true;
 #endif
-#ifdef USE_NNAPI
-    providers.push_back(ExecutionProvider::NNAPI);
-#endif
-    
-    return providers;
-}
-
-bool InferenceEngineFactory::isProviderAvailable(ExecutionProvider provider) {
-    auto providers = getAvailableProviders();
-    return std::find(providers.begin(), providers.end(), provider) != providers.end();
-}
-
-std::string InferenceEngineFactory::getProviderName(ExecutionProvider provider) {
-    switch (provider) {
-        case ExecutionProvider::CPU: return "CPU";
-        case ExecutionProvider::CUDA: return "CUDA";
-        case ExecutionProvider::TensorRT: return "TensorRT";
-        case ExecutionProvider::OpenVINO: return "OpenVINO";
-        case ExecutionProvider::NNAPI: return "NNAPI";
-        case ExecutionProvider::CoreML: return "CoreML";
-        case ExecutionProvider::DNNL: return "DNNL";
-        case ExecutionProvider::XNNPACK: return "XNNPACK";
-        case ExecutionProvider::VitisAI: return "VitisAI";
-        case ExecutionProvider::RockchipNPU: return "RockchipNPU";
-        default: return "Unknown";
+        default:                            return false;
     }
+}
+
+std::unique_ptr<IInferenceEngine> InferenceEngineFactory::create(
+    InferenceBackend backend,
+    const core::InferenceConfig& config) {
+
+    switch (backend) {
+        case InferenceBackend::OnnxRuntime:
+            LOG_INFO("Creating OnnxRuntime inference engine");
+            return std::make_unique<OnnxInferenceEngine>(config);
+
+        case InferenceBackend::RKNN:
+            LOG_INFO("Creating RKNN inference engine");
+            return std::make_unique<RKNNInferenceEngine>(config);
+
+        case InferenceBackend::TensorRT:
+            LOG_ERROR("TensorRT backend not yet implemented.");
+            return nullptr;
+
+        case InferenceBackend::Auto:
+        default:
+            // Auto：根据平台自动选择最优后端
+            LOG_INFO("Backend=Auto, selecting OnnxRuntime as default");
+            return std::make_unique<OnnxInferenceEngine>(config);
+    }
+}
+
+std::unique_ptr<IInferenceEngine> InferenceEngineFactory::create(
+    const core::InferenceConfig& config) {
+
+    // 优先根据配置中的 backend 字段选择后端
+    InferenceBackend backend = parseBackend(config.backend);
+    if (backend == InferenceBackend::Auto) {
+        // 未指定 backend 时，根据 execution_provider 向后兼容推断
+        backend = parseBackend(config.execution_provider);
+        if (backend == InferenceBackend::Auto) {
+            backend = InferenceBackend::OnnxRuntime;
+        }
+    }
+    return create(backend, config);
 }
 
 } // namespace inference

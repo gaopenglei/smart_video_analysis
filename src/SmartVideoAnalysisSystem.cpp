@@ -4,6 +4,7 @@
  */
 
 #include "SmartVideoAnalysisSystem.hpp"
+#include "modules/inference/InferenceEngine.hpp"  // 工厂实现，仅在此 .cpp 中引入
 #include <chrono>
 #include <fstream>
 #include <sstream>
@@ -97,9 +98,12 @@ bool SmartVideoAnalysisSystem::initializeModules() {
         return false;
     }
     
-    // 初始化推理引擎
+    // 初始化推理引擎（通过工厂创建，返回 IInferenceEngine 接口）
+    // 切换 backend 只需改 config_.inference.backend，此处代码无需修改
     inference_engine_ = modules::inference::InferenceEngineFactory::create(
         config_.inference);
+    LOG_INFO("Inference backend: %s",
+             inference_engine_ ? inference_engine_->getBackendName().c_str() : "NONE");
     
     if (!inference_engine_) {
         LOG_ERROR("Failed to create inference engine");

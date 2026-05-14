@@ -103,18 +103,41 @@ struct ModelConfig {
 
 /**
  * @brief 推理配置结构体
+ *
+ * 字段分为两层：
+ *   - 通用字段：所有后端共用，切换后端时无需修改
+ *   - 后端专属字段：仅对特定推理库有效，其他后端忽略
  */
 struct InferenceConfig {
-    int num_threads = 4;            ///< 推理线程数
-    bool use_gpu = false;           ///< 是否使用GPU
-    int gpu_device_id = 0;          ///< GPU设备ID
-    std::string execution_provider = "CPU"; ///< 执行提供器: "CPU", "CUDA", "TensorRT", "OpenVINO", "NNAPI"
-    std::string optimization_level = "all"; ///< 图优化级别: "all", "extended", "basic", "disable"
-    bool enable_profiling = false;  ///< 是否启用性能分析
-    std::string profiling_output_dir; ///< 性能分析输出目录
-    int warmup_iterations = 3;      ///< 预热迭代次数
-    bool enable_memory_pattern = true; ///< 是否启用内存模式优化
-    bool enable_memory_allocator = true; ///< 是否启用内存分配器优化
+    // ----------------------------------------------------------------
+    // 【通用字段】所有推理后端共用
+    // ----------------------------------------------------------------
+    /// 推理后端: "OnnxRuntime"(默认)、"RKNN"、"TensorRT"、"OpenVINO"、"CoreML"
+    /// 留空或 "Auto" 时由工厂自动选择
+    std::string backend = "OnnxRuntime";
+
+    int num_threads   = 4;      ///< CPU 推理线程数
+    bool use_gpu      = false;  ///< 是否启用 GPU/NPU 加速
+    int gpu_device_id = 0;      ///< GPU/NPU 设备 ID
+    int warmup_iterations = 3;  ///< 预热推理次数（首次推理通常较慢）
+    bool enable_profiling = false;        ///< 是否启用性能分析
+    std::string profiling_output_dir;     ///< 性能分析结果输出目录
+
+    // ----------------------------------------------------------------
+    // 【OnnxRuntime 专属字段】切换到其他后端时这些字段会被忽略
+    // ----------------------------------------------------------------
+    /// ORT 执行提供器: "CPU"(默认)、"CUDA"、"TensorRT"、"OpenVINO"、"NNAPI"
+    /// 当 backend="OnnxRuntime" 时生效
+    std::string execution_provider = "CPU";
+    std::string optimization_level = "all"; ///< ORT 图优化级别: "all"/"extended"/"basic"/"disable"
+    bool enable_memory_pattern    = true;   ///< ORT 内存模式优化
+    bool enable_memory_allocator  = true;   ///< ORT 内存分配器优化
+
+    // ----------------------------------------------------------------
+    // 【RKNN 专属字段】切换到 ORT/TRT 时这些字段会被忽略
+    // ----------------------------------------------------------------
+    int rknn_core_mask = 0;     ///< RKNN NPU 核心掩码（0=自动，RK3588 支持多核）
+    bool rknn_async    = false; ///< RKNN 是否使用异步推理模式
 };
 
 /**

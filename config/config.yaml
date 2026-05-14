@@ -96,14 +96,22 @@ model:
 # 推理配置
 # ------------------------------------------------------------
 inference:
-  # 推理线程数
+  # 推理后端: OnnxRuntime(默认), RKNN, TensorRT, OpenVINO, CoreML, Auto
+  # 只需修改此字段即可切换推理后端，其他模块代码无需修改
+  backend: "OnnxRuntime"
+  
+  # 推理线程数（CPU 推理时生效）
   num_threads: 4
   
-  # 执行提供者: CPU, CUDA, TensorRT, OpenVINO, NNAPI
+  # 【OnnxRuntime 专属】执行提供者: CPU, CUDA, TensorRT, OpenVINO, NNAPI
+  # backend="OnnxRuntime" 时生效
   execution_provider: "CPU"
   
-  # 图优化级别: all, extended, basic, disable
+  # 【OnnxRuntime 专属】图优化级别: all, extended, basic, disable
   optimization_level: "all"
+  
+  # 【RKNN 专属】NPU 核心掩码（RK3588 三核 NPU: 0x1/0x2/0x4，0=自动）
+  rknn_core_mask: 0
   
   # 设备ID (用于GPU)
   device_id: 0

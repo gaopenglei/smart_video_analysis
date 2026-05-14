@@ -22,7 +22,7 @@
 #include "core/ErrorHandling.hpp"
 #include "modules/video_input/VideoInput.hpp"
 #include "modules/preprocessing/ImagePreprocessor.hpp"
-#include "modules/inference/InferenceEngine.hpp"
+#include "modules/inference/IInferenceEngine.hpp"   // 只依赖抽象接口，不含任何后端头文件
 #include "modules/postprocessing/DetectionPostprocessor.hpp"
 #include "modules/visualization/Visualizer.hpp"
 #include "modules/operator_adapter/OperatorAdapter.hpp"
@@ -239,13 +239,13 @@ private:
      */
     void initializeClassNames();
 
-    // 核心模块
-    std::unique_ptr<modules::video_input::VideoInputManager> video_input_;
-    std::unique_ptr<modules::preprocessing::IImagePreprocessor> preprocessor_;
-    std::unique_ptr<modules::inference::OnnxInferenceEngine> inference_engine_;
+    // 核心模块（均通过接口持有，与具体实现解耦）
+    std::unique_ptr<modules::video_input::VideoInputManager>          video_input_;
+    std::unique_ptr<modules::preprocessing::IImagePreprocessor>       preprocessor_;
+    std::unique_ptr<modules::inference::IInferenceEngine>             inference_engine_; // 抽象接口
     std::unique_ptr<modules::postprocessing::IDetectionPostprocessor> postprocessor_;
-    std::unique_ptr<modules::visualization::VisualizationManager> visualizer_;
-    std::unique_ptr<modules::operator_adapter::IOperatorAdapter> operator_adapter_;
+    std::unique_ptr<modules::visualization::VisualizationManager>     visualizer_;
+    std::unique_ptr<modules::operator_adapter::IOperatorAdapter>      operator_adapter_;
     
     // 配置
     core::SystemConfig config_;

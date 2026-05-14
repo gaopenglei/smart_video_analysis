@@ -1,8 +1,10 @@
 /**
  * @file InferenceEngine.hpp
- * @brief ONNX Runtime推理引擎头文件
- * 
- * 提供基于ONNX Runtime的高效推理功能，支持多种执行提供者。
+ * @brief ONNX Runtime 推理引擎实现类头文件
+ *
+ * 仅包含 OnnxInferenceEngine 的声明。
+ * 上层代码应使用 IInferenceEngine.hpp 中定义的抽象接口，
+ * 不要在非推理模块中直接包含本头文件，以保持后端解耦。
  */
 
 #ifndef MODULES_INFERENCE_INFERENCE_ENGINE_HPP
@@ -14,288 +16,135 @@
 #include <mutex>
 #include <map>
 #include <future>
-#include <chrono>
-#include <onnxruntime_cxx_api.h>
+#include "modules/inference/IInferenceEngine.hpp"
 #include "core/Config.hpp"
-#include "core/ErrorHandling.hpp"
+
+// ORT 头文件仅在 .cpp 中真正使用，这里前向声明其核心类型以减少编译依赖。
+// 具体的 ORT 类型定义在 InferenceEngine.cpp 中通过 #include 引入。
+namespace Ort {
+    class Env;
+    class Session;
+    class SessionOptions;
+    class Value;
+    template<typename T> class AllocatorWithDefaultOptions_;
+    using AllocatorWithDefaultOptions = AllocatorWithDefaultOptions_<void>;
+}
 
 namespace smart_video_analysis {
 namespace modules {
 namespace inference {
 
 /**
- * @brief 张量信息结构体
+ * @brief 基于 ONNX Runtime 的推理引擎实现
+ *
+ * 实现 IInferenceEngine 接口，所有 ORT 相关细节封装在此类中。
+ * 如需接入 TensorRT 或 RKNN，只需新建对应实现类，无需改动上层代码。
  */
-struct TensorInfo {
-    std::string name;                   ///< 张量名称
-    std::vector<int64_t> shape;         ///< 张量形状
-    ONNXTensorElementDataType type;     ///< 数据类型
-    size_t element_count;               ///< 元素数量
-    size_t byte_size;                   ///< 字节大小
-    
-    TensorInfo() : type(ONNX_TENSOR_ELEMENT_DATA_FLOAT), 
-                   element_count(0), byte_size(0) {}
-};
-
-/**
- * @brief 推理结果结构体
- */
-struct InferenceResult {
-    std::vector<std::vector<float>> outputs;    ///< 输出张量数据
-    std::vector<TensorInfo> output_infos;       ///< 输出张量信息
-    double inference_time_ms;                   ///< 推理耗时（毫秒）
-    double preprocess_time_ms;                  ///< 预处理耗时（毫秒）
-    double postprocess_time_ms;                 ///< 后处理耗时（毫秒）
-    int64_t timestamp_ms;                       ///< 时间戳
-    
-    InferenceResult() : inference_time_ms(0), preprocess_time_ms(0),
-                        postprocess_time_ms(0), timestamp_ms(0) {}
-};
-
-/**
- * @brief 推理性能统计结构体
- */
-struct InferenceStats {
-    int64_t total_inferences;           ///< 总推理次数
-    double total_time_ms;               ///< 总耗时
-    double min_time_ms;                 ///< 最小耗时
-    double max_time_ms;                 ///< 最大耗时
-    double avg_time_ms;                 ///< 平均耗时
-    double fps;                         ///< 帧率
-    
-    InferenceStats() : total_inferences(0), total_time_ms(0), min_time_ms(1e9),
-                       max_time_ms(0), avg_time_ms(0), fps(0) {}
-    
-    void update(double time_ms) {
-        total_inferences++;
-        total_time_ms += time_ms;
-        min_time_ms = std::min(min_time_ms, time_ms);
-        max_time_ms = std::max(max_time_ms, time_ms);
-        avg_time_ms = total_time_ms / total_inferences;
-        fps = 1000.0 / avg_time_ms;
-    }
-};
-
-/**
- * @brief 执行提供者枚举
- */
-enum class ExecutionProvider {
-    CPU,            ///< CPU执行
-    CUDA,           ///< NVIDIA CUDA
-    TensorRT,       ///< NVIDIA TensorRT
-    OpenVINO,       ///< Intel OpenVINO
-    NNAPI,          ///< Android NNAPI
-    CoreML,         ///< Apple CoreML
-    DNNL,           ///< Intel DNNL
-    XNNPACK,        ///< XNNPACK
-    VitisAI,        ///< AMD Vitis AI
-    RockchipNPU     ///< 瑞芯微NPU (RK3588)
-};
-
-/**
- * @brief ONNX Runtime推理引擎类
- * 
- * 封装ONNX Runtime API，提供高效的模型推理功能。
- */
-class OnnxInferenceEngine {
+class OnnxInferenceEngine : public IInferenceEngine {
 public:
-    /**
-     * @brief 构造函数
-     * @param config 推理配置
-     */
     explicit OnnxInferenceEngine(const core::InferenceConfig& config);
-    
-    /**
-     * @brief 析构函数
-     */
-    ~OnnxInferenceEngine();
-    
-    /**
-     * @brief 加载模型
-     * @param model_path 模型路径
-     * @return 成功返回ErrorCode::SUCCESS
-     */
-    core::ErrorCode loadModel(const std::string& model_path);
-    
-    /**
-     * @brief 卸载模型
-     */
-    void unloadModel();
-    
-    /**
-     * @brief 执行推理
-     * @param input_data 输入数据
-     * @param result 输出结果
-     * @return 成功返回ErrorCode::SUCCESS
-     */
-    core::ErrorCode infer(const std::vector<float>& input_data, 
-                          InferenceResult& result);
-    
-    /**
-     * @brief 执行推理（多输入）
-     * @param input_data 多个输入数据
-     * @param result 输出结果
-     * @return 成功返回ErrorCode::SUCCESS
-     */
+    ~OnnxInferenceEngine() override;
+
+    // -- IInferenceEngine 接口实现 --
+    core::ErrorCode loadModel(const std::string& model_path) override;
+    void unloadModel() override;
+    bool isModelLoaded() const override;
+
+    core::ErrorCode infer(const std::vector<float>& input_data,
+                          InferenceResult& result) override;
     core::ErrorCode infer(const std::vector<std::vector<float>>& input_data,
-                          InferenceResult& result);
-    
-    /**
-     * @brief 异步推理
-     * @param input_data 输入数据
-     * @return 包含推理结果的 future，推理失败时 future 会抛出异常
-     */
-    std::future<InferenceResult> inferAsync(const std::vector<float>& input_data);
-    
-    /**
-     * @brief 检查模型是否已加载
-     */
-    bool isModelLoaded() const;
-    
-    /**
-     * @brief 获取输入张量信息
-     */
-    const std::vector<TensorInfo>& getInputInfos() const;
-    
-    /**
-     * @brief 获取输出张量信息
-     */
-    const std::vector<TensorInfo>& getOutputInfos() const;
-    
-    /**
-     * @brief 获取输入形状
-     */
-    std::vector<int64_t> getInputShape(int index = 0) const;
-    
-    /**
-     * @brief 获取输出形状
-     */
-    std::vector<int64_t> getOutputShape(int index = 0) const;
-    
-    /**
-     * @brief 获取性能统计
-     */
-    const InferenceStats& getStats() const;
-    
-    /**
-     * @brief 重置性能统计
-     */
-    void resetStats();
-    
-    /**
-     * @brief 设置执行提供者
-     */
-    void setExecutionProvider(ExecutionProvider provider);
-    
-    /**
-     * @brief 获取当前执行提供者
-     */
-    ExecutionProvider getExecutionProvider() const;
-    
-    /**
-     * @brief 设置线程数
-     */
+                          InferenceResult& result) override;
+    std::future<InferenceResult> inferAsync(
+        const std::vector<float>& input_data) override;
+
+    const std::vector<TensorInfo>& getInputInfos()  const override;
+    const std::vector<TensorInfo>& getOutputInfos() const override;
+    std::vector<int64_t> getInputShape(int index = 0)  const override;
+    std::vector<int64_t> getOutputShape(int index = 0) const override;
+    std::map<std::string, std::string> getModelMetadata() const override;
+
+    const InferenceStats& getStats() const override;
+    void resetStats() override;
+    void printModelInfo() const override;
+    void setVerbose(bool verbose) override;
+    std::string getBackendName() const override { return "OnnxRuntime"; }
+
+    // -- ORT 专属接口（上层代码不应调用，供单元测试/调试使用）--
     void setNumThreads(int num_threads);
-    
-    /**
-     * @brief 设置GPU设备ID
-     */
     void setGpuDeviceId(int device_id);
-    
-    /**
-     * @brief 启用/禁用详细日志
-     */
-    void setVerbose(bool verbose);
-    
-    /**
-     * @brief 获取模型元数据
-     */
-    std::map<std::string, std::string> getModelMetadata() const;
-    
-    /**
-     * @brief 打印模型信息
-     */
-    void printModelInfo() const;
 
 private:
-    /**
-     * @brief 初始化ONNX Runtime环境
-     */
     bool initializeEnvironment();
-    
-    /**
-     * @brief 创建会话选项
-     */
-    Ort::SessionOptions createSessionOptions();
-    
-    /**
-     * @brief 配置执行提供者
-     */
-    void configureExecutionProvider(Ort::SessionOptions& options);
-    
-    /**
-     * @brief 提取模型输入输出信息
-     */
-    void extractModelInfo();
-    
-    /**
-     * @brief 创建输入张量
-     */
-    Ort::Value createInputTensor(const std::vector<float>& data, int index);
-    
-    /**
-     * @brief 创建输入张量（多输入）
-     */
-    std::vector<Ort::Value> createInputTensors(
-        const std::vector<std::vector<float>>& input_data);
 
-    // 成员变量
+    // 使用 pImpl 模式将 ORT 具体类型完全隔离在 .cpp 中
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+
     core::InferenceConfig config_;
-    std::unique_ptr<Ort::Env> env_;
-    std::unique_ptr<Ort::Session> session_;
-    std::unique_ptr<Ort::AllocatorWithDefaultOptions> allocator_;
-    
-    std::vector<TensorInfo> input_infos_;
-    std::vector<TensorInfo> output_infos_;
-    std::vector<std::string> input_names_;
-    std::vector<std::string> output_names_;
-    std::vector<const char*> input_name_ptrs_;
-    std::vector<const char*> output_name_ptrs_;
-    
-    ExecutionProvider execution_provider_;
     InferenceStats stats_;
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     bool model_loaded_ = false;
-    bool verbose_ = false;
+    bool verbose_      = false;
+};
+
+// ============================================================================
+// 推理引擎工厂
+// ============================================================================
+
+/**
+ * @brief 推理后端类型枚举
+ *
+ * 通过配置或编译宏选择要使用的推理后端，无需修改任何上层代码。
+ */
+enum class InferenceBackend {
+    OnnxRuntime,    ///< ONNX Runtime（跨平台，支持 CPU/CUDA/OpenVINO/NNAPI）
+    TensorRT,       ///< NVIDIA TensorRT（高性能 GPU 推理）
+    RKNN,           ///< 瑞芯微 RKNN（RK3588 NPU 原生推理）
+    OpenVINO,       ///< Intel OpenVINO（独立后端，非 ORT EP）
+    CoreML,         ///< Apple CoreML（iOS/macOS）
+    Auto            ///< 根据平台和配置自动选择
 };
 
 /**
- * @brief 推理引擎工厂类
+ * @brief 推理引擎工厂
+ *
+ * 统一创建入口，返回 IInferenceEngine 接口指针。
+ * 上层代码与具体实现类完全解耦。
  */
 class InferenceEngineFactory {
 public:
     /**
-     * @brief 创建推理引擎
-     * @param config 推理配置
-     * @return 推理引擎实例
+     * @brief 根据配置自动选择并创建推理引擎
+     * @param config 推理配置（包含 execution_provider / backend 字段）
+     * @return IInferenceEngine 接口实例
      */
-    static std::unique_ptr<OnnxInferenceEngine> create(
+    static std::unique_ptr<IInferenceEngine> create(
         const core::InferenceConfig& config);
-    
+
     /**
-     * @brief 获取可用的执行提供者列表
+     * @brief 显式指定后端类型创建推理引擎
+     * @param backend 后端类型
+     * @param config  推理配置
+     * @return IInferenceEngine 接口实例
      */
-    static std::vector<ExecutionProvider> getAvailableProviders();
-    
+    static std::unique_ptr<IInferenceEngine> create(
+        InferenceBackend backend,
+        const core::InferenceConfig& config);
+
     /**
-     * @brief 检查执行提供者是否可用
+     * @brief 检查指定后端在当前平台是否可用
      */
-    static bool isProviderAvailable(ExecutionProvider provider);
-    
+    static bool isBackendAvailable(InferenceBackend backend);
+
     /**
-     * @brief 获取执行提供者名称
+     * @brief 获取后端名称字符串
      */
-    static std::string getProviderName(ExecutionProvider provider);
+    static std::string getBackendName(InferenceBackend backend);
+
+    /**
+     * @brief 将字符串（如 "OnnxRuntime"、"RKNN"）解析为枚举值
+     */
+    static InferenceBackend parseBackend(const std::string& name);
 };
 
 } // namespace inference
